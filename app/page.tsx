@@ -5,6 +5,7 @@ import { supabase } from '../lib/supabase'
 
 import { occursOn, nextDue, repeatLabel, fmtWhen, DAYS, type Item, type Rule } from '../lib/schedule'
 import { syncClassroom, CLASSROOM_SCOPES } from '../lib/classroom'
+import { enablePush } from '../lib/push'
 
 type List = { id: string; name: string; color: string }
 type Tab = 'reminders' | 'calendar'
@@ -93,6 +94,7 @@ function App() {
     setAdding(false)
   }
 
+  const alerts = async () => setNote(await enablePush())
   const syncNow = async () => {
     setSyncing(true); setNote('')
     try {
@@ -149,6 +151,7 @@ function App() {
             </button>
           ))}
         </div>
+        <button onClick={alerts} className="rounded-xl bg-card py-3 font-medium ring-1 ring-line">Enable notifications</button>
         <button onClick={syncNow} disabled={syncing} className="rounded-xl bg-card py-3 font-medium ring-1 ring-line">{syncing ? 'Syncing...' : 'Sync Classroom'}</button>
         <button onClick={() => setAdding(true)} className="rounded-xl bg-accent py-3 font-medium text-white">New item</button>
         <button onClick={signOut} className="mt-auto text-left text-sm text-muted">Sign out</button>
@@ -157,7 +160,7 @@ function App() {
       <main className="min-w-0 flex-1 px-4 pb-32 pt-[max(1rem,env(safe-area-inset-top))] md:px-10 md:pb-10 md:pt-8">
         <header className="mb-4 flex items-center justify-between">
           <h2 className="text-3xl font-semibold tracking-tight">{tab === 'reminders' ? 'Reminders' : 'Calendar'}</h2>
-          <div className="flex gap-4 md:hidden"><button onClick={syncNow} disabled={syncing} className="text-sm text-accent">{syncing ? 'Syncing...' : 'Sync Classroom'}</button><button onClick={signOut} className="text-sm text-muted">Sign out</button></div>
+          <div className="flex gap-3 md:hidden"><button onClick={alerts} className="text-sm text-accent">Alerts</button><button onClick={syncNow} disabled={syncing} className="text-sm text-accent">{syncing ? '...' : 'Sync'}</button><button onClick={signOut} className="text-sm text-muted">Sign out</button></div>
         </header>
         {note && <p className="mb-4 text-sm text-muted">{note}</p>}
         <div className="mb-6 flex gap-2 overflow-x-auto pb-1 md:hidden">
