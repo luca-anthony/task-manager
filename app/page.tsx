@@ -265,7 +265,7 @@ function Sheet({ lists, onClose, onSave }: { lists: List[]; onClose: () => void;
   const [title, setTitle] = useState(''); const [list, setList] = useState(lists[0]?.id ?? '')
   const [type, setType] = useState<'task' | 'event'>('task'); const [allDay, setAllDay] = useState(false)
   const [start, setStart] = useState(''); const [end, setEnd] = useState('')
-  const [rule, setRule] = useState<Rule>('none'); const [days, setDays] = useState<number[]>([]); const [rem, setRem] = useState('')
+  const [rule, setRule] = useState<Rule>('none'); const [days, setDays] = useState<number[]>([]); const [rem, setRem] = useState('0')
   const save = () => {
     if (!title.trim() || (type === 'event' && !start)) return
     const s = start ? new Date(allDay ? start + 'T00:00' : start) : null
@@ -297,7 +297,7 @@ function Sheet({ lists, onClose, onSave }: { lists: List[]; onClose: () => void;
           <button key={i} onClick={() => setDays(p => (p.includes(i) ? p.filter(x => x !== i) : [...p, i]))} className={`size-10 rounded-full text-sm ring-1 ${days.includes(i) ? 'bg-accent text-white ring-accent' : 'ring-line'}`}>{d}</button>
         ))}</div>}
         <select className={field} value={rem} onChange={e => setRem(e.target.value)} disabled={!start}>
-          <option value="">No alert</option><option value="0">At time of {type === 'event' ? 'event' : 'reminder'}</option><option value="10">10 minutes before</option><option value="60">1 hour before</option><option value="1440">1 day before</option>
+          <option value="0">At time of {type === 'event' ? 'event' : 'reminder'}</option><option value="">No alert</option><option value="10">10 minutes before</option><option value="60">1 hour before</option><option value="1440">1 day before</option>
         </select>
         <button onClick={save} className="w-full rounded-xl bg-accent py-3 font-medium text-white">Add {type === 'event' ? 'event' : 'reminder'}</button>
       </div>
