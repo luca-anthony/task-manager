@@ -1,5 +1,5 @@
 'use client'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
 
@@ -66,6 +66,7 @@ function App() {
   const [tab, setTab] = useState<Tab>('reminders'); const [hidden, setHidden] = useState<string[]>([])
   const [adding, setAdding] = useState(false); const [showDone, setShowDone] = useState(false)
   const [syncing, setSyncing] = useState(false); const [note, setNote] = useState('')
+  const [menu, setMenu] = useState<Item | null>(null); const [editing, setEditing] = useState<Item | null>(null)
 
   const load = useCallback(async () => {
     const getLists = () => supabase.from('lists').select('*').order('created_at')
@@ -101,6 +102,10 @@ function App() {
     setAdding(false)
   }
 
+  const update = async (id: string, row: Partial<Item>) => {
+    setItems(p => p.map(x => (x.id === id ? { ...x, ...row } : x))); setEditing(null)
+    await supabase.from('items').update(row).eq('id', id)
+  }
   const alerts = async () => setNote(await enablePush())
   const syncNow = async () => {
     setSyncing(true); setNote('')
@@ -137,7 +142,7 @@ function App() {
   const tabs: [Tab, string, string][] = [['reminders', 'Reminders', '✓'], ['calendar', 'Calendar', '▦']]
   const flip = (id: string) => setHidden(h => (h.includes(id) ? h.filter(x => x !== id) : [...h, id]))
   const signOut = () => supabase.auth.signOut()
-  const row = (it: Item) => <Row key={it.id} it={it} list={listOf(it.list_id)} onToggle={toggle} onRemove={remove} />
+  const row = (it: Item) => <Row key={it.id} it={it} list={listOf(it.list_id)} onToggle={toggle} onMenu={setMenu} />
 
   return (
     <div className="mx-auto flex min-h-dvh max-w-6xl">
@@ -207,16 +212,19 @@ function App() {
           </button>
         ))}
       </nav>
-      {adding && <Sheet lists={lists} onClose={() => setAdding(false)} onSave={add} />}
+      {menu && <Menu it={menu} onClose={() => setMenu(null)} onEdit={() => { setEditing(menu); setMenu(null) }} onDelete={() => { remove(menu.id); setMenu(null) }} />}
+      {(adding || editing) && <Sheet key={editing?.id ?? 'new'} lists={lists} item={editing ?? undefined} onClose={() => { setAdding(false); setEditing(null) }} onSave={editing ? (r => update(editing.id, r)) : add} />}
     </div>
   )
 }
 
-function Row({ it, list, onToggle, onRemove }: { it: Item; list?: List; onToggle: (i: Item) => void; onRemove: (id: string) => void }) {
+function Row({ it, list, onToggle, onMenu }: { it: Item; list?: List; onToggle: (i: Item) => void; onMenu: (i: Item) => void }) {
   const late = !it.done && it.due_at && new Date(it.due_at) < new Date()
   const color = list?.color ?? GREY
+  const hold = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const stop = () => clearTimeout(hold.current)
   return (
-    <div className="group flex items-center gap-3 rounded-2xl bg-card px-4 py-3 ring-1 ring-line">
+    <div className="group flex select-none items-center gap-3 rounded-2xl bg-card px-4 py-3 ring-1 ring-line" style={{ WebkitTouchCallout: 'none' }} onContextMenu={e => { e.preventDefault(); onMenu(it) }} onTouchStart={() => { hold.current = setTimeout(() => onMenu(it), 500) }} onTouchEnd={stop} onTouchMove={stop}>
       <button aria-label="Mark done" onClick={() => onToggle(it)} className="flex size-6 shrink-0 items-center justify-center rounded-full border-2 text-xs text-white" style={{ borderColor: color, background: it.done ? color : 'transparent' }}>{it.done && '✓'}</button>
       <div className="min-w-0 flex-1">
         <p className={`truncate ${it.done ? 'text-muted line-through' : ''}`}>{it.title}</p>
@@ -225,7 +233,7 @@ function Row({ it, list, onToggle, onRemove }: { it: Item; list?: List; onToggle
         </p>
       </div>
       {it.source === 'classroom' && it.notes && <a href={it.notes} target="_blank" rel="noreferrer" className="text-sm text-accent">Open</a>}
-      <button onClick={() => onRemove(it.id)} aria-label="Delete" className="px-1 text-muted md:opacity-0 md:group-hover:opacity-100">✕</button>
+      <button onClick={() => onMenu(it)} aria-label="More options" className="px-1 text-xl leading-none text-muted md:opacity-0 md:group-hover:opacity-100">⋯</button>
     </div>
   )
 }
@@ -261,45 +269,84 @@ function Calendar({ items, listOf, row }: { items: Item[]; listOf: ListOf; row: 
   )
 }
 
-function Sheet({ lists, onClose, onSave }: { lists: List[]; onClose: () => void; onSave: (r: Partial<Item>) => void }) {
-  const [title, setTitle] = useState(''); const [list, setList] = useState(lists[0]?.id ?? '')
-  const [type, setType] = useState<'task' | 'event'>('task'); const [allDay, setAllDay] = useState(false)
-  const [start, setStart] = useState(''); const [end, setEnd] = useState('')
-  const [rule, setRule] = useState<Rule>('none'); const [days, setDays] = useState<number[]>([]); const [rem, setRem] = useState('0')
+function Menu({ it, onClose, onEdit, onDelete }: { it: Item; onClose: () => void; onEdit: () => void; onDelete: () => void }) {
+  const t0 = useRef(Date.now()) // ignore the tap that ends a long-press
+  const btn = 'w-full rounded-xl px-3 py-3 text-left hover:bg-bg'
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 md:items-center" onClick={() => { if (Date.now() - t0.current > 400) onClose() }}>
+      <div onClick={e => e.stopPropagation()} className="w-full max-w-xs space-y-1 rounded-t-3xl bg-card p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] md:rounded-3xl">
+        <p className="truncate px-3 py-2 text-sm text-muted">{it.title}</p>
+        <button onClick={onEdit} className={btn}>{it.source === 'classroom' ? 'Edit alert' : 'Edit'}</button>
+        <button onClick={onDelete} className={`${btn} text-red-500`}>Delete</button>
+        <button onClick={onClose} className={`${btn} text-muted md:hidden`}>Cancel</button>
+      </div>
+    </div>
+  )
+}
+
+const pad = (n: number) => String(n).padStart(2, '0')
+const toLocal = (iso: string | null, dateOnly = false) => {
+  if (!iso) return ''
+  const d = new Date(iso); const day = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  return dateOnly ? day : `${day}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+const PRESETS = ['0', '10', '60', '1440', '2880']
+
+function Sheet({ lists, item, onClose, onSave }: { lists: List[]; item?: Item; onClose: () => void; onSave: (r: Partial<Item>) => void }) {
+  const locked = item?.source === 'classroom' // title and due date come from Classroom; only the alert is editable
+  const [title, setTitle] = useState(item?.title ?? ''); const [list, setList] = useState(item?.list_id ?? lists[0]?.id ?? '')
+  const [type, setType] = useState<'task' | 'event'>(item?.type === 'event' ? 'event' : 'task'); const [allDay, setAllDay] = useState(item?.all_day ?? false)
+  const [start, setStart] = useState(toLocal(item?.due_at ?? null, item?.all_day))
+  const [end, setEnd] = useState(toLocal(item?.ends_at ?? null))
+  const [rule, setRule] = useState<Rule>(item?.repeat_rule ?? 'none'); const [days, setDays] = useState<number[]>(item?.repeat_days ?? [])
+  const offset = item?.due_at && item.remind_at ? String(Math.round((+new Date(item.due_at) - +new Date(item.remind_at)) / 6e4)) : ''
+  const [rem, setRem] = useState(!item ? '0' : !item.remind_at ? '' : PRESETS.includes(offset) ? offset : 'custom')
+  const [remAt, setRemAt] = useState(toLocal(item?.remind_at ?? null))
   const save = () => {
-    if (!title.trim() || (type === 'event' && !start)) return
     const s = start ? new Date(allDay ? start + 'T00:00' : start) : null
+    const remind_at = rem === 'custom' ? (remAt ? new Date(remAt).toISOString() : null) : s && rem !== '' ? new Date(+s - Number(rem) * 6e4).toISOString() : null
+    if (locked) return onSave({ remind_at })
+    if (!title.trim() || (type === 'event' && !start)) return
     const e = end && !allDay && type === 'event' ? new Date(end) : null
     onSave({
       title: title.trim(), list_id: list || null, type, all_day: allDay, due_at: s ? s.toISOString() : null, ends_at: e ? e.toISOString() : null,
-      repeat_rule: s ? rule : 'none', repeat_days: rule === 'custom' ? days : null,
-      remind_at: s && rem !== '' ? new Date(+s - Number(rem) * 6e4).toISOString() : null,
+      repeat_rule: s ? rule : 'none', repeat_days: rule === 'custom' ? days : null, remind_at,
     })
   }
   const seg = (on: boolean) => `flex-1 rounded-lg py-2 text-sm font-medium ${on ? 'bg-card shadow-sm' : 'text-muted'}`
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 md:items-center" onClick={onClose}>
       <div onClick={e => e.stopPropagation()} className="max-h-[92dvh] w-full max-w-md space-y-3 overflow-y-auto rounded-t-3xl bg-card p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] md:rounded-3xl">
-        <div className="flex rounded-xl bg-bg p-1">
-          <button className={seg(type === 'task')} onClick={() => setType('task')}>Reminder</button>
-          <button className={seg(type === 'event')} onClick={() => setType('event')}>Event</button>
+        {locked ? (
+          <div><p className="font-medium">{item?.title}</p><p className="text-sm text-muted">{item && fmtWhen(item)}. Title and due date come from Classroom.</p></div>
+        ) : (<>
+          <div className="flex rounded-xl bg-bg p-1">
+            <button className={seg(type === 'task')} onClick={() => setType('task')}>Reminder</button>
+            <button className={seg(type === 'event')} onClick={() => setType('event')}>Event</button>
+          </div>
+          <input autoFocus className={field} placeholder="Title" value={title} onChange={e => setTitle(e.target.value)} />
+          <select className={field} value={list} onChange={e => setList(e.target.value)}>{lists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}</select>
+          <label className="flex items-center justify-between py-1"><span>All day</span><input type="checkbox" className="size-5" checked={allDay} onChange={e => { setAllDay(e.target.checked); setStart(''); setEnd('') }} /></label>
+          <div><p className="mb-1 text-sm text-muted">{type === 'event' ? 'Starts' : 'Due'}</p><input type={allDay ? 'date' : 'datetime-local'} className={field} value={start} onChange={e => setStart(e.target.value)} /></div>
+          {type === 'event' && !allDay && <div><p className="mb-1 text-sm text-muted">Ends</p><input type="datetime-local" className={field} value={end} onChange={e => setEnd(e.target.value)} /></div>}
+          <select className={field} value={rule} onChange={e => setRule(e.target.value as Rule)} disabled={!start}>
+            <option value="none">Never repeat</option><option value="daily">Every day</option><option value="weekdays">Weekdays</option><option value="weekends">Weekends</option>
+            <option value="weekly">Every week</option><option value="monthly">Every month</option><option value="custom">Custom days</option>
+          </select>
+          {rule === 'custom' && <div className="flex justify-between">{DAYS.map((d, i) => (
+            <button key={i} onClick={() => setDays(p => (p.includes(i) ? p.filter(x => x !== i) : [...p, i]))} className={`size-10 rounded-full text-sm ring-1 ${days.includes(i) ? 'bg-accent text-white ring-accent' : 'ring-line'}`}>{d}</button>
+          ))}</div>}
+        </>)}
+        <div>
+          <p className="mb-1 text-sm text-muted">Alert</p>
+          <select className={field} value={rem} onChange={e => setRem(e.target.value)}>
+            <option value="0">At time of {locked ? 'due date' : type === 'event' ? 'event' : 'reminder'}</option><option value="">No alert</option>
+            <option value="10">10 minutes before</option><option value="60">1 hour before</option><option value="1440">1 day before</option><option value="2880">2 days before</option>
+            <option value="custom">Custom time...</option>
+          </select>
         </div>
-        <input autoFocus className={field} placeholder="Title" value={title} onChange={e => setTitle(e.target.value)} />
-        <select className={field} value={list} onChange={e => setList(e.target.value)}>{lists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}</select>
-        <label className="flex items-center justify-between py-1"><span>All day</span><input type="checkbox" className="size-5" checked={allDay} onChange={e => { setAllDay(e.target.checked); setStart(''); setEnd('') }} /></label>
-        <div><p className="mb-1 text-sm text-muted">{type === 'event' ? 'Starts' : 'Due'}</p><input type={allDay ? 'date' : 'datetime-local'} className={field} value={start} onChange={e => setStart(e.target.value)} /></div>
-        {type === 'event' && !allDay && <div><p className="mb-1 text-sm text-muted">Ends</p><input type="datetime-local" className={field} value={end} onChange={e => setEnd(e.target.value)} /></div>}
-        <select className={field} value={rule} onChange={e => setRule(e.target.value as Rule)} disabled={!start}>
-          <option value="none">Never repeat</option><option value="daily">Every day</option><option value="weekdays">Weekdays</option><option value="weekends">Weekends</option>
-          <option value="weekly">Every week</option><option value="monthly">Every month</option><option value="custom">Custom days</option>
-        </select>
-        {rule === 'custom' && <div className="flex justify-between">{DAYS.map((d, i) => (
-          <button key={i} onClick={() => setDays(p => (p.includes(i) ? p.filter(x => x !== i) : [...p, i]))} className={`size-10 rounded-full text-sm ring-1 ${days.includes(i) ? 'bg-accent text-white ring-accent' : 'ring-line'}`}>{d}</button>
-        ))}</div>}
-        <select className={field} value={rem} onChange={e => setRem(e.target.value)} disabled={!start}>
-          <option value="0">At time of {type === 'event' ? 'event' : 'reminder'}</option><option value="">No alert</option><option value="10">10 minutes before</option><option value="60">1 hour before</option><option value="1440">1 day before</option>
-        </select>
-        <button onClick={save} className="w-full rounded-xl bg-accent py-3 font-medium text-white">Add {type === 'event' ? 'event' : 'reminder'}</button>
+        {rem === 'custom' && <input type="datetime-local" className={field} value={remAt} onChange={e => setRemAt(e.target.value)} />}
+        <button onClick={save} className="w-full rounded-xl bg-accent py-3 font-medium text-white">{item ? 'Save changes' : `Add ${type === 'event' ? 'event' : 'reminder'}`}</button>
       </div>
     </div>
   )

@@ -19,6 +19,13 @@ const dueOf = (w: any) => {
   return t ? new Date(Date.UTC(d.year, d.month - 1, d.day, t.hours ?? 0, t.minutes ?? 0)) : new Date(d.year, d.month - 1, d.day, 23, 59)
 }
 
+// Default alert for new assignments: 4 PM the day before they're due (skipped if that time already passed).
+const dayBefore = (iso: string | null) => {
+  if (!iso) return null
+  const d = new Date(iso); const r = new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1, 16, 0)
+  return r > new Date() ? r.toISOString() : null
+}
+
 export async function syncClassroom(token: string, uid: string) {
   const { courses = [] } = await api(token, 'courses?studentId=me&courseStates=ACTIVE&pageSize=50')
   let total = 0
@@ -32,7 +39,15 @@ export async function syncClassroom(token: string, uid: string) {
       user_id: uid, list_id: l?.id ?? null, title: w.title, type: 'assignment', source: 'classroom',
       external_id: `${c.id}:${w.id}`, due_at: dueOf(w)?.toISOString() ?? null, notes: w.alternateLink ?? null,
     }))
-    if (rows.length) await supabase.from('items').upsert(rows, { onConflict: 'user_id,source,external_id' })
+    if (rows.length) {
+      // Only brand-new assignments get the default alert, so alerts you customize are never overwritten by a re-sync.
+      const { data: have } = await supabase.from('items').select('external_id').eq('source', 'classroom').in('external_id', rows.map((r: any) => r.external_id))
+      const known = new Set((have ?? []).map(h => h.external_id))
+      const fresh = rows.filter((r: any) => !known.has(r.external_id)).map((r: any) => ({ ...r, remind_at: dayBefore(r.due_at) }))
+      const old = rows.filter((r: any) => known.has(r.external_id))
+      if (fresh.length) await supabase.from('items').upsert(fresh, { onConflict: 'user_id,source,external_id' })
+      if (old.length) await supabase.from('items').upsert(old, { onConflict: 'user_id,source,external_id' })
+    }
     // Only ever sets done to true, so your own checkmarks are never undone.
     if (turnedIn.length) await supabase.from('items').update({ done: true }).eq('source', 'classroom').in('external_id', turnedIn)
     total += rows.length
