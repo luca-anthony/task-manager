@@ -3,10 +3,14 @@ import { useCallback, useEffect, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
 
+import { occursOn, nextDue, repeatLabel, fmtWhen, DAYS, type Item, type Rule } from '../lib/schedule'
+import { syncClassroom, CLASSROOM_SCOPES } from '../lib/classroom'
+
 type List = { id: string; name: string; color: string }
-type Item = { id: string; list_id: string | null; title: string; type: 'task' | 'event' | 'assignment'; due_at: string | null; remind_at: string | null; done: boolean }
 type Tab = 'reminders' | 'calendar'
 type ListOf = (id: string | null) => List | undefined
+const opts = () => ({ scopes: CLASSROOM_SCOPES, redirectTo: window.location.origin, queryParams: { prompt: 'consent' } })
+const keep = (s: Session | null) => { if (s?.provider_token) localStorage.setItem('gtoken', JSON.stringify({ t: s.provider_token, at: Date.now() })) }
 
 const DEFAULT_LISTS = [
   { name: 'School', color: '#3b82f6' }, { name: 'Music', color: '#a855f7' },
@@ -21,8 +25,8 @@ export default function Page() {
   const [session, setSession] = useState<Session | null>(null)
   const [ready, setReady] = useState(false)
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => { setSession(data.session); setReady(true) })
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, s) => setSession(s))
+    supabase.auth.getSession().then(({ data }) => { keep(data.session); setSession(data.session); setReady(true) })
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, s) => { keep(s); setSession(s) })
     return () => subscription.unsubscribe()
   }, [])
   if (!ready) return null
@@ -50,6 +54,7 @@ function Auth() {
         {msg && <p className="text-sm text-muted">{msg}</p>}
         <button onClick={submit} className="w-full rounded-xl bg-accent py-3 font-medium text-white">{signup ? 'Create account' : 'Sign in'}</button>
         <button onClick={() => setSignup(!signup)} className="w-full text-sm text-muted">{signup ? 'Have an account? Sign in' : 'New here? Create an account'}</button>
+        <button onClick={() => supabase.auth.signInWithOAuth({ provider: 'google', options: opts() })} className="w-full rounded-xl bg-bg py-3 font-medium ring-1 ring-line">Continue with Google</button>
       </div>
     </main>
   )
@@ -59,6 +64,7 @@ function App() {
   const [lists, setLists] = useState<List[]>([]); const [items, setItems] = useState<Item[]>([])
   const [tab, setTab] = useState<Tab>('reminders'); const [hidden, setHidden] = useState<string[]>([])
   const [adding, setAdding] = useState(false); const [showDone, setShowDone] = useState(false)
+  const [syncing, setSyncing] = useState(false); const [note, setNote] = useState('')
 
   const load = useCallback(async () => {
     const getLists = () => supabase.from('lists').select('*').order('created_at')
@@ -70,8 +76,12 @@ function App() {
   useEffect(() => { load() }, [load])
 
   const toggle = async (it: Item) => {
-    setItems(p => p.map(x => (x.id === it.id ? { ...x, done: !x.done } : x)))
-    await supabase.from('items').update({ done: !it.done }).eq('id', it.id)
+    const nxt = it.done || it.type === 'event' ? null : nextDue(it)
+    const patch: Partial<Item> = nxt && it.due_at
+      ? { due_at: nxt, remind_at: it.remind_at ? new Date(+new Date(nxt) - (+new Date(it.due_at) - +new Date(it.remind_at))).toISOString() : null }
+      : { done: !it.done }
+    setItems(p => p.map(x => (x.id === it.id ? { ...x, ...patch } : x)))
+    await supabase.from('items').update(patch).eq('id', it.id)
   }
   const remove = async (id: string) => {
     setItems(p => p.filter(x => x.id !== id))
@@ -82,6 +92,27 @@ function App() {
     if (data) setItems(p => [...p, data])
     setAdding(false)
   }
+
+  const syncNow = async () => {
+    setSyncing(true); setNote('')
+    try {
+      const { data } = await supabase.auth.getUser(); const user = data.user
+      if (!user) return
+      const saved = JSON.parse(localStorage.getItem('gtoken') ?? 'null')
+      if (!saved || Date.now() - saved.at > 55 * 6e4) {
+        const hasGoogle = user.identities?.some(i => i.provider === 'google')
+        await (hasGoogle ? supabase.auth.signInWithOAuth({ provider: 'google', options: opts() }) : supabase.auth.linkIdentity({ provider: 'google', options: opts() }))
+        return
+      }
+      const n = await syncClassroom(saved.t, user.id)
+      await load(); setNote(`Synced ${n} assignments from Classroom.`)
+    } catch (e) { setNote(e instanceof Error ? e.message : 'Sync failed.') }
+    finally { setSyncing(false) }
+  }
+  useEffect(() => { // auto-sync right after coming back from Google sign-in
+    const g = JSON.parse(localStorage.getItem('gtoken') ?? 'null')
+    if (g && Date.now() - g.at < 55 * 6e4 && localStorage.getItem('gsynced') !== String(g.at)) { localStorage.setItem('gsynced', String(g.at)); syncNow() }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const listOf: ListOf = id => lists.find(l => l.id === id)
   const visible = items.filter(i => !hidden.includes(i.list_id ?? 'none'))
@@ -118,6 +149,7 @@ function App() {
             </button>
           ))}
         </div>
+        <button onClick={syncNow} disabled={syncing} className="rounded-xl bg-card py-3 font-medium ring-1 ring-line">{syncing ? 'Syncing...' : 'Sync Classroom'}</button>
         <button onClick={() => setAdding(true)} className="rounded-xl bg-accent py-3 font-medium text-white">New item</button>
         <button onClick={signOut} className="mt-auto text-left text-sm text-muted">Sign out</button>
       </aside>
@@ -125,8 +157,9 @@ function App() {
       <main className="min-w-0 flex-1 px-4 pb-32 pt-[max(1rem,env(safe-area-inset-top))] md:px-10 md:pb-10 md:pt-8">
         <header className="mb-4 flex items-center justify-between">
           <h2 className="text-3xl font-semibold tracking-tight">{tab === 'reminders' ? 'Reminders' : 'Calendar'}</h2>
-          <button onClick={signOut} className="text-sm text-muted md:hidden">Sign out</button>
+          <div className="flex gap-4 md:hidden"><button onClick={syncNow} disabled={syncing} className="text-sm text-accent">{syncing ? 'Syncing...' : 'Sync Classroom'}</button><button onClick={signOut} className="text-sm text-muted">Sign out</button></div>
         </header>
+        {note && <p className="mb-4 text-sm text-muted">{note}</p>}
         <div className="mb-6 flex gap-2 overflow-x-auto pb-1 md:hidden">
           {lists.map(l => (
             <button key={l.id} onClick={() => flip(l.id)} className={`flex shrink-0 items-center gap-2 rounded-full bg-card px-3.5 py-1.5 text-sm ring-1 ring-line ${hidden.includes(l.id) ? 'opacity-40' : ''}`}>
@@ -178,9 +211,10 @@ function Row({ it, list, onToggle, onRemove }: { it: Item; list?: List; onToggle
       <div className="min-w-0 flex-1">
         <p className={`truncate ${it.done ? 'text-muted line-through' : ''}`}>{it.title}</p>
         <p className={`truncate text-xs ${late ? 'text-red-500' : 'text-muted'}`}>
-          {[list?.name, it.type !== 'task' && it.type, it.due_at && fmt(it.due_at), it.remind_at && !it.done && 'reminder set'].filter(Boolean).join(', ')}
+          {[list?.name, it.type === 'event' && 'event', fmtWhen(it), repeatLabel(it), it.remind_at && !it.done && 'alert set'].filter(Boolean).join(', ')}
         </p>
       </div>
+      {it.source === 'classroom' && it.notes && <a href={it.notes} target="_blank" rel="noreferrer" className="text-sm text-accent">Open</a>}
       <button onClick={() => onRemove(it.id)} aria-label="Delete" className="px-1 text-muted md:opacity-0 md:group-hover:opacity-100">✕</button>
     </div>
   )
@@ -189,12 +223,12 @@ function Row({ it, list, onToggle, onRemove }: { it: Item; list?: List; onToggle
 function Calendar({ items, listOf, row }: { items: Item[]; listOf: ListOf; row: (i: Item) => React.ReactNode }) {
   const [cur, setCur] = useState(() => { const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), 1) })
   const [sel, setSel] = useState(new Date())
-  const by: Record<string, Item[]> = {}
-  items.forEach(i => { if (i.due_at) (by[key(new Date(i.due_at))] ||= []).push(i) })
+  const on = (d: Date) => items.filter(i => occursOn(i, d))
+  
   const days = new Date(cur.getFullYear(), cur.getMonth() + 1, 0).getDate()
   const cells: (Date | null)[] = [...Array(cur.getDay()).fill(null), ...Array.from({ length: days }, (_, d) => new Date(cur.getFullYear(), cur.getMonth(), d + 1))]
   const move = (n: number) => setCur(new Date(cur.getFullYear(), cur.getMonth() + n, 1))
-  const today = key(new Date()); const picked = by[key(sel)] ?? []
+  const today = key(new Date()); const picked = on(sel)
   const nav = 'size-10 rounded-full bg-card text-lg ring-1 ring-line'
   return (
     <div className="max-w-2xl">
@@ -207,7 +241,7 @@ function Calendar({ items, listOf, row }: { items: Item[]; listOf: ListOf; row: 
         {cells.map((d, i) => d ? (
           <button key={i} onClick={() => setSel(d)} className={`flex aspect-square flex-col items-center justify-between rounded-xl p-1.5 text-sm ring-1 ${key(d) === key(sel) ? 'bg-accent text-white ring-accent' : 'bg-card ring-line'} ${key(d) === today && key(d) !== key(sel) ? 'font-bold text-accent' : ''}`}>
             {d.getDate()}
-            <span className="flex h-1.5 gap-0.5">{(by[key(d)] ?? []).slice(0, 3).map(it => <i key={it.id} className="size-1.5 rounded-full" style={{ background: listOf(it.list_id)?.color ?? GREY }} />)}</span>
+            <span className="flex h-1.5 gap-0.5">{on(d).slice(0, 3).map(it => <i key={it.id} className="size-1.5 rounded-full" style={{ background: listOf(it.list_id)?.color ?? GREY }} />)}</span>
           </button>
         ) : <div key={i} />)}
       </div>
@@ -219,26 +253,43 @@ function Calendar({ items, listOf, row }: { items: Item[]; listOf: ListOf; row: 
 
 function Sheet({ lists, onClose, onSave }: { lists: List[]; onClose: () => void; onSave: (r: Partial<Item>) => void }) {
   const [title, setTitle] = useState(''); const [list, setList] = useState(lists[0]?.id ?? '')
-  const [type, setType] = useState<Item['type']>('task'); const [due, setDue] = useState(''); const [rem, setRem] = useState('')
+  const [type, setType] = useState<'task' | 'event'>('task'); const [allDay, setAllDay] = useState(false)
+  const [start, setStart] = useState(''); const [end, setEnd] = useState('')
+  const [rule, setRule] = useState<Rule>('none'); const [days, setDays] = useState<number[]>([]); const [rem, setRem] = useState('')
   const save = () => {
-    if (!title.trim()) return
-    const d = due ? new Date(due) : null
-    onSave({ title: title.trim(), list_id: list || null, type, due_at: d ? d.toISOString() : null, remind_at: d && rem !== '' ? new Date(+d - Number(rem) * 6e4).toISOString() : null })
+    if (!title.trim() || (type === 'event' && !start)) return
+    const s = start ? new Date(allDay ? start + 'T00:00' : start) : null
+    const e = end && !allDay && type === 'event' ? new Date(end) : null
+    onSave({
+      title: title.trim(), list_id: list || null, type, all_day: allDay, due_at: s ? s.toISOString() : null, ends_at: e ? e.toISOString() : null,
+      repeat_rule: s ? rule : 'none', repeat_days: rule === 'custom' ? days : null,
+      remind_at: s && rem !== '' ? new Date(+s - Number(rem) * 6e4).toISOString() : null,
+    })
   }
+  const seg = (on: boolean) => `flex-1 rounded-lg py-2 text-sm font-medium ${on ? 'bg-card shadow-sm' : 'text-muted'}`
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 md:items-center" onClick={onClose}>
-      <div onClick={e => e.stopPropagation()} className="w-full max-w-md space-y-3 rounded-t-3xl bg-card p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] md:rounded-3xl">
-        <h2 className="text-lg font-semibold">New item</h2>
-        <input autoFocus className={field} placeholder="Title" value={title} onChange={e => setTitle(e.target.value)} onKeyDown={e => e.key === 'Enter' && save()} />
-        <div className="grid grid-cols-2 gap-3">
-          <select className={field} value={list} onChange={e => setList(e.target.value)}>{lists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}</select>
-          <select className={field} value={type} onChange={e => setType(e.target.value as Item['type'])}><option value="task">Task</option><option value="assignment">Assignment</option><option value="event">Event</option></select>
+      <div onClick={e => e.stopPropagation()} className="max-h-[92dvh] w-full max-w-md space-y-3 overflow-y-auto rounded-t-3xl bg-card p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] md:rounded-3xl">
+        <div className="flex rounded-xl bg-bg p-1">
+          <button className={seg(type === 'task')} onClick={() => setType('task')}>Reminder</button>
+          <button className={seg(type === 'event')} onClick={() => setType('event')}>Event</button>
         </div>
-        <input type="datetime-local" className={field} value={due} onChange={e => setDue(e.target.value)} />
-        <select className={field} value={rem} onChange={e => setRem(e.target.value)} disabled={!due}>
-          <option value="">No reminder</option><option value="0">At due time</option><option value="10">10 minutes before</option><option value="60">1 hour before</option><option value="1440">1 day before</option>
+        <input autoFocus className={field} placeholder="Title" value={title} onChange={e => setTitle(e.target.value)} />
+        <select className={field} value={list} onChange={e => setList(e.target.value)}>{lists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}</select>
+        <label className="flex items-center justify-between py-1"><span>All day</span><input type="checkbox" className="size-5" checked={allDay} onChange={e => { setAllDay(e.target.checked); setStart(''); setEnd('') }} /></label>
+        <div><p className="mb-1 text-sm text-muted">{type === 'event' ? 'Starts' : 'Due'}</p><input type={allDay ? 'date' : 'datetime-local'} className={field} value={start} onChange={e => setStart(e.target.value)} /></div>
+        {type === 'event' && !allDay && <div><p className="mb-1 text-sm text-muted">Ends</p><input type="datetime-local" className={field} value={end} onChange={e => setEnd(e.target.value)} /></div>}
+        <select className={field} value={rule} onChange={e => setRule(e.target.value as Rule)} disabled={!start}>
+          <option value="none">Never repeat</option><option value="daily">Every day</option><option value="weekdays">Weekdays</option><option value="weekends">Weekends</option>
+          <option value="weekly">Every week</option><option value="monthly">Every month</option><option value="custom">Custom days</option>
         </select>
-        <button onClick={save} className="w-full rounded-xl bg-accent py-3 font-medium text-white">Add</button>
+        {rule === 'custom' && <div className="flex justify-between">{DAYS.map((d, i) => (
+          <button key={i} onClick={() => setDays(p => (p.includes(i) ? p.filter(x => x !== i) : [...p, i]))} className={`size-10 rounded-full text-sm ring-1 ${days.includes(i) ? 'bg-accent text-white ring-accent' : 'ring-line'}`}>{d}</button>
+        ))}</div>}
+        <select className={field} value={rem} onChange={e => setRem(e.target.value)} disabled={!start}>
+          <option value="">No alert</option><option value="0">At time of {type === 'event' ? 'event' : 'reminder'}</option><option value="10">10 minutes before</option><option value="60">1 hour before</option><option value="1440">1 day before</option>
+        </select>
+        <button onClick={save} className="w-full rounded-xl bg-accent py-3 font-medium text-white">Add {type === 'event' ? 'event' : 'reminder'}</button>
       </div>
     </div>
   )
