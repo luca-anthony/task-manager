@@ -5,7 +5,7 @@ import { supabase } from '../lib/supabase'
 
 import { occursOn, nextDue, repeatLabel, fmtWhen, DAYS, type Item, type Rule } from '../lib/schedule'
 import { syncClassroom, CLASSROOM_SCOPES } from '../lib/classroom'
-import { enablePush } from '../lib/push'
+import { enablePush, refreshPush } from '../lib/push'
 
 type List = { id: string; name: string; color: string }
 type Tab = 'reminders' | 'calendar'
@@ -75,6 +75,13 @@ function App() {
     setLists(l ?? []); setItems(i ?? [])
   }, [])
   useEffect(() => { load() }, [load])
+  useEffect(() => { // keep devices in sync: live changes + refresh when the app comes to the front
+    refreshPush()
+    const ch = supabase.channel('items-sync').on('postgres_changes', { event: '*', schema: 'public', table: 'items' }, () => load()).subscribe()
+    const onVis = () => { if (document.visibilityState === 'visible') load() }
+    document.addEventListener('visibilitychange', onVis)
+    return () => { supabase.removeChannel(ch); document.removeEventListener('visibilitychange', onVis) }
+  }, [load])
 
   const toggle = async (it: Item) => {
     const nxt = it.done || it.type === 'event' ? null : nextDue(it)

@@ -14,13 +14,13 @@ export async function POST(req: Request) {
   if (!fresh.length) return Response.json({ sent: 0 })
 
   const { data: subs } = await db.from('push_subscriptions').select('*').in('user_id', [...new Set(fresh.map(i => i.user_id))])
-  const tz = process.env.APP_TIMEZONE ?? 'America/Chicago'
+  const fallbackTz = process.env.APP_TIMEZONE ?? 'America/Chicago'
   let sent = 0
   for (const it of fresh) {
-    const when = it.due_at ? new Date(it.due_at).toLocaleString('en-US', it.all_day ? { timeZone: tz, month: 'short', day: 'numeric' } : { timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''
+    const fmtFor = (tz: string) => (it.due_at ? new Date(it.due_at).toLocaleString('en-US', it.all_day ? { timeZone: tz, month: 'short', day: 'numeric' } : { timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '')
     for (const s of (subs ?? []).filter(s => s.user_id === it.user_id)) {
       try {
-        await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, JSON.stringify({ title: it.title, body: when && `Due ${when}`, url: '/' }))
+        await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, JSON.stringify({ title: it.title, body: it.due_at ? `Due ${fmtFor(s.tz ?? fallbackTz)}` : '', url: '/' }))
         sent++
       } catch (e) {
         if ([404, 410].includes((e as { statusCode?: number }).statusCode ?? 0)) await db.from('push_subscriptions').delete().eq('id', s.id)
