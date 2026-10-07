@@ -30,8 +30,12 @@ export async function syncClassroom(token: string, uid: string) {
   const { courses = [] } = await api(token, 'courses?studentId=me&courseStates=ACTIVE&pageSize=50')
   let total = 0
   for (const [n, c] of courses.entries()) {
-    await supabase.from('lists').upsert({ user_id: uid, name: c.name, color: COLORS[n % COLORS.length] }, { onConflict: 'user_id,name', ignoreDuplicates: true })
-    const { data: l } = await supabase.from('lists').select('id').eq('name', c.name).single()
+    // Courses are matched by Google's course id, so renaming a list never creates a duplicate.
+    let { data: l } = await supabase.from('lists').select('id').eq('external_id', c.id).maybeSingle()
+    if (!l) {
+      const adopted = await supabase.from('lists').update({ external_id: c.id, grp: 'Classes' }).eq('name', c.name).is('external_id', null).select('id').maybeSingle()
+      l = adopted.data ?? (await supabase.from('lists').insert({ user_id: uid, name: c.name, color: COLORS[n % COLORS.length], grp: 'Classes', external_id: c.id }).select('id').single()).data
+    }
     const { courseWork = [] } = await api(token, `courses/${c.id}/courseWork?courseWorkStates=PUBLISHED&pageSize=100`)
     const { studentSubmissions = [] } = await api(token, `courses/${c.id}/courseWork/-/studentSubmissions?userId=me&pageSize=100`)
     const turnedIn = studentSubmissions.filter((s: any) => ['TURNED_IN', 'RETURNED'].includes(s.state)).map((s: any) => `${c.id}:${s.courseWorkId}`)

@@ -7,7 +7,7 @@ import { occursOn, nextDue, repeatLabel, fmtWhen, DAYS, type Item, type Rule } f
 import { syncClassroom, CLASSROOM_SCOPES } from '../lib/classroom'
 import { enablePush, refreshPush } from '../lib/push'
 
-type List = { id: string; name: string; color: string }
+type List = { id: string; name: string; color: string; grp: string | null }
 type Tab = 'reminders' | 'calendar'
 type ListOf = (id: string | null) => List | undefined
 const opts = () => ({ scopes: CLASSROOM_SCOPES, redirectTo: window.location.origin, queryParams: { prompt: 'consent' } })
@@ -63,10 +63,12 @@ function Auth() {
 
 function App() {
   const [lists, setLists] = useState<List[]>([]); const [items, setItems] = useState<Item[]>([])
-  const [tab, setTab] = useState<Tab>('reminders'); const [hidden, setHidden] = useState<string[]>([])
+  const [tab, setTab] = useState<Tab>('reminders'); const [hidden, setHidden] = useState<string[]>(() => JSON.parse(localStorage.getItem('hidden') ?? '[]'))
   const [adding, setAdding] = useState(false); const [showDone, setShowDone] = useState(false)
   const [syncing, setSyncing] = useState(false); const [note, setNote] = useState('')
   const [menu, setMenu] = useState<Item | null>(null); const [editing, setEditing] = useState<Item | null>(null)
+  const [listEdit, setListEdit] = useState<List | 'new' | null>(null); const [panel, setPanel] = useState(false)
+  useEffect(() => { localStorage.setItem('hidden', JSON.stringify(hidden)) }, [hidden])
 
   const load = useCallback(async () => {
     const getLists = () => supabase.from('lists').select('*').order('created_at')
@@ -142,6 +144,20 @@ function App() {
   const tabs: [Tab, string, string][] = [['reminders', 'Reminders', '✓'], ['calendar', 'Calendar', '▦']]
   const flip = (id: string) => setHidden(h => (h.includes(id) ? h.filter(x => x !== id) : [...h, id]))
   const signOut = () => supabase.auth.signOut()
+  const saveList = async (row: Partial<List>, id?: string) => {
+    if (id) { setLists(p => p.map(l => (l.id === id ? { ...l, ...row } : l))); await supabase.from('lists').update(row).eq('id', id) }
+    else {
+      const { data, error } = await supabase.from('lists').insert(row).select().single()
+      if (error) setNote(error.message.includes('duplicate') ? 'You already have a list with that name.' : error.message)
+      else if (data) setLists(p => [...p, data])
+    }
+    setListEdit(null)
+  }
+  const deleteList = async (id: string) => {
+    setLists(p => p.filter(l => l.id !== id)); setItems(p => p.map(i => (i.list_id === id ? { ...i, list_id: null } : i))); setListEdit(null)
+    await supabase.from('lists').delete().eq('id', id)
+  }
+  const listPanel = <ListPanel lists={lists} items={items} hidden={hidden} setHidden={setHidden} onEdit={setListEdit} />
   const row = (it: Item) => <Row key={it.id} it={it} list={listOf(it.list_id)} onToggle={toggle} onMenu={setMenu} />
 
   return (
@@ -155,14 +171,7 @@ function App() {
             </button>
           ))}
         </nav>
-        <div className="space-y-1">
-          <p className="mb-2 px-3 text-sm font-medium text-muted">Lists</p>
-          {lists.map(l => (
-            <button key={l.id} onClick={() => flip(l.id)} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left hover:bg-card ${hidden.includes(l.id) ? 'opacity-40' : ''}`}>
-              <i className="size-3 rounded-full" style={{ background: l.color }} />{l.name}
-            </button>
-          ))}
-        </div>
+        <div className="-mx-2 min-h-0 flex-1 overflow-y-auto px-2">{listPanel}</div>
         <button onClick={alerts} className="rounded-xl bg-card py-3 font-medium ring-1 ring-line">Enable notifications</button>
         <button onClick={syncNow} disabled={syncing} className="rounded-xl bg-card py-3 font-medium ring-1 ring-line">{syncing ? 'Syncing...' : 'Sync Classroom'}</button>
         <button onClick={() => setAdding(true)} className="rounded-xl bg-accent py-3 font-medium text-white">New item</button>
@@ -175,13 +184,7 @@ function App() {
           <div className="flex gap-3 md:hidden"><button onClick={alerts} className="text-sm text-accent">Alerts</button><button onClick={syncNow} disabled={syncing} className="text-sm text-accent">{syncing ? '...' : 'Sync'}</button><button onClick={signOut} className="text-sm text-muted">Sign out</button></div>
         </header>
         {note && <p className="mb-4 text-sm text-muted">{note}</p>}
-        <div className="mb-6 flex gap-2 overflow-x-auto pb-1 md:hidden">
-          {lists.map(l => (
-            <button key={l.id} onClick={() => flip(l.id)} className={`flex shrink-0 items-center gap-2 rounded-full bg-card px-3.5 py-1.5 text-sm ring-1 ring-line ${hidden.includes(l.id) ? 'opacity-40' : ''}`}>
-              <i className="size-2.5 rounded-full" style={{ background: l.color }} />{l.name}
-            </button>
-          ))}
-        </div>
+        <button onClick={() => setPanel(true)} className="mb-6 flex items-center gap-2 rounded-full bg-card px-4 py-2 text-sm ring-1 ring-line md:hidden">Lists{hidden.length > 0 && <span className="text-muted">({hidden.length} hidden)</span>}</button>
 
         {tab === 'reminders' ? (
           <div className="max-w-2xl">
@@ -212,6 +215,12 @@ function App() {
           </button>
         ))}
       </nav>
+      {panel && (
+        <div className="fixed inset-0 z-50 flex items-end bg-black/40 md:hidden" onClick={() => setPanel(false)}>
+          <div onClick={e => e.stopPropagation()} className="max-h-[80dvh] w-full overflow-y-auto rounded-t-3xl bg-card p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">{listPanel}</div>
+        </div>
+      )}
+      {listEdit && <ListSheet key={listEdit === 'new' ? 'new' : listEdit.id} list={listEdit === 'new' ? undefined : listEdit} groups={[...new Set(lists.flatMap(l => (l.grp ? [l.grp] : [])))]} onClose={() => setListEdit(null)} onSave={saveList} onDelete={deleteList} />}
       {menu && <Menu it={menu} onClose={() => setMenu(null)} onEdit={() => { setEditing(menu); setMenu(null) }} onDelete={() => { remove(menu.id); setMenu(null) }} />}
       {(adding || editing) && <Sheet key={editing?.id ?? 'new'} lists={lists} item={editing ?? undefined} onClose={() => { setAdding(false); setEditing(null) }} onSave={editing ? (r => update(editing.id, r)) : add} />}
     </div>
@@ -325,7 +334,9 @@ function Sheet({ lists, item, onClose, onSave }: { lists: List[]; item?: Item; o
             <button className={seg(type === 'event')} onClick={() => setType('event')}>Event</button>
           </div>
           <input autoFocus className={field} placeholder="Title" value={title} onChange={e => setTitle(e.target.value)} />
-          <select className={field} value={list} onChange={e => setList(e.target.value)}>{lists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}</select>
+          <select className={field} value={list} onChange={e => setList(e.target.value)}>
+            {[...new Set(lists.map(l => l.grp ?? ''))].map(g => <optgroup key={g} label={g || 'Lists'}>{lists.filter(l => (l.grp ?? '') === g).map(l => <option key={l.id} value={l.id}>{l.name}</option>)}</optgroup>)}
+          </select>
           <label className="flex items-center justify-between py-1"><span>All day</span><input type="checkbox" className="size-5" checked={allDay} onChange={e => { setAllDay(e.target.checked); setStart(''); setEnd('') }} /></label>
           <div><p className="mb-1 text-sm text-muted">{type === 'event' ? 'Starts' : 'Due'}</p><input type={allDay ? 'date' : 'datetime-local'} className={field} value={start} onChange={e => setStart(e.target.value)} /></div>
           {type === 'event' && !allDay && <div><p className="mb-1 text-sm text-muted">Ends</p><input type="datetime-local" className={field} value={end} onChange={e => setEnd(e.target.value)} /></div>}
@@ -347,6 +358,62 @@ function Sheet({ lists, item, onClose, onSave }: { lists: List[]; item?: Item; o
         </div>
         {rem === 'custom' && <input type="datetime-local" className={field} value={remAt} onChange={e => setRemAt(e.target.value)} />}
         <button onClick={save} className="w-full rounded-xl bg-accent py-3 font-medium text-white">{item ? 'Save changes' : `Add ${type === 'event' ? 'event' : 'reminder'}`}</button>
+      </div>
+    </div>
+  )
+}
+
+function ListPanel({ lists, items, hidden, setHidden, onEdit }: { lists: List[]; items: Item[]; hidden: string[]; setHidden: React.Dispatch<React.SetStateAction<string[]>>; onEdit: (l: List | 'new') => void }) {
+  const [shut, setShut] = useState<string[]>([])
+  const flip = (ids: string[]) => setHidden(h => (ids.every(i => h.includes(i)) ? h.filter(x => !ids.includes(x)) : [...new Set([...h, ...ids])]))
+  const count = (id: string) => items.filter(i => i.list_id === id && !i.done).length || ''
+  const rowOf = (l: List) => (
+    <div key={l.id} className={`group flex items-center rounded-xl hover:bg-card ${hidden.includes(l.id) ? 'opacity-40' : ''}`}>
+      <button onClick={() => flip([l.id])} className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2 text-left">
+        <i className="size-3 shrink-0 rounded-full" style={{ background: l.color }} /><span className="truncate">{l.name}</span><span className="ml-auto text-xs text-muted">{count(l.id)}</span>
+      </button>
+      <button onClick={() => onEdit(l)} aria-label={`Edit ${l.name}`} className="px-3 py-2 text-muted md:opacity-0 md:group-hover:opacity-100">✎</button>
+    </div>
+  )
+  const groups = [...new Set(lists.flatMap(l => (l.grp ? [l.grp] : [])))]
+  return (
+    <div className="space-y-4">
+      <div className="space-y-0.5">{lists.filter(l => !l.grp).map(rowOf)}</div>
+      {groups.map(g => {
+        const ls = lists.filter(l => l.grp === g); const ids = ls.map(l => l.id)
+        const off = ids.every(i => hidden.includes(i)); const open = !shut.includes(g)
+        return (
+          <div key={g}>
+            <div className="flex items-center justify-between px-3 pb-1">
+              <button onClick={() => setShut(p => (open ? [...p, g] : p.filter(x => x !== g)))} className="flex items-center gap-1.5 text-sm font-medium text-muted"><span className="w-3 text-xs">{open ? '▾' : '▸'}</span>{g}</button>
+              <button onClick={() => flip(ids)} className="text-xs text-accent">{off ? 'Show all' : 'Hide all'}</button>
+            </div>
+            {open && <div className="space-y-0.5">{ls.map(rowOf)}</div>}
+          </div>
+        )
+      })}
+      <button onClick={() => onEdit('new')} className="w-full rounded-xl px-3 py-2 text-left text-sm text-accent hover:bg-card">+ New list</button>
+    </div>
+  )
+}
+
+const SWATCH = ['#3b82f6', '#a855f7', '#f59e0b', '#10b981', '#ef4444', '#06b6d4', '#ec4899', '#84cc16', '#f97316', '#64748b']
+
+function ListSheet({ list, groups, onClose, onSave, onDelete }: { list?: List; groups: string[]; onClose: () => void; onSave: (r: Partial<List>, id?: string) => void; onDelete: (id: string) => void }) {
+  const [name, setName] = useState(list?.name ?? ''); const [color, setColor] = useState(list?.color ?? SWATCH[0]); const [grp, setGrp] = useState(list?.grp ?? '')
+  const save = () => { if (name.trim()) onSave({ name: name.trim(), color, grp: grp.trim() || null }, list?.id) }
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 md:items-center" onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} className="w-full max-w-md space-y-3 rounded-t-3xl bg-card p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] md:rounded-3xl">
+        <h2 className="text-lg font-semibold">{list ? 'Edit list' : 'New list'}</h2>
+        <input autoFocus className={field} placeholder="List name" value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && save()} />
+        <div className="flex flex-wrap gap-3">
+          {SWATCH.map(c => <button key={c} onClick={() => setColor(c)} aria-label={`Color ${c}`} className="flex size-9 items-center justify-center rounded-full text-white" style={{ background: c }}>{color === c && '✓'}</button>)}
+        </div>
+        <input className={field} list="group-options" placeholder="Group (optional), like Classes" value={grp} onChange={e => setGrp(e.target.value)} />
+        <datalist id="group-options">{groups.map(g => <option key={g} value={g} />)}</datalist>
+        <button onClick={save} className="w-full rounded-xl bg-accent py-3 font-medium text-white">{list ? 'Save changes' : 'Create list'}</button>
+        {list && <button onClick={() => { if (confirm(`Delete "${list.name}"? Its items stay, but lose their list.`)) onDelete(list.id) }} className="w-full py-2 text-sm text-red-500">Delete list</button>}
       </div>
     </div>
   )
